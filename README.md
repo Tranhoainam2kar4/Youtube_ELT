@@ -48,21 +48,23 @@ A production-grade, containerized ELT data pipeline orchestrating daily YouTube 
 
 ## Tech Stack
 
-| Domain | Technology | Version | Purpose |
-| :--- | :--- | :--- | :--- |
-| **Orchestration** | Apache Airflow | `2.9.3` | Multi-DAG workflow scheduling, CeleryExecutor task distribution, and pipeline chaining |
-| **Warehouse / DB** | PostgreSQL | `13` | Multi-tenant instance hosting metadata, Celery backend, and ELT warehouse (`staging` & `core`) |
-| **Data Quality** | Soda Core | `3.3.14` | Declarative schema validation, entity uniqueness, and business metric integrity assertions |
-| **Testing** | pytest | `8.3.3` | Automated unit testing, DAG structural integrity checks, and live integration tests |
-| **CI/CD** | GitHub Actions | Ubuntu Latest | Automated image build, Docker Hub deployment, test execution, and end-to-end DAG runs |
-| **Containerization** | Docker Compose | Compose v2 | Multi-container isolation for Airflow services, Redis broker, and PostgreSQL |
+| Domain               | Technology     | Version       | Purpose                                                                                        |
+| :------------------- | :------------- | :------------ | :--------------------------------------------------------------------------------------------- |
+| **Orchestration**    | Apache Airflow | `2.9.3`       | Multi-DAG workflow scheduling, CeleryExecutor task distribution, and pipeline chaining         |
+| **Warehouse / DB**   | PostgreSQL     | `13`          | Multi-tenant instance hosting metadata, Celery backend, and ELT warehouse (`staging` & `core`) |
+| **Data Quality**     | Soda Core      | `3.3.14`      | Declarative schema validation, entity uniqueness, and business metric integrity assertions     |
+| **Testing**          | pytest         | `8.3.3`       | Automated unit testing, DAG structural integrity checks, and live integration tests            |
+| **CI/CD**            | GitHub Actions | Ubuntu Latest | Automated image build, Docker Hub deployment, test execution, and end-to-end DAG runs          |
+| **Containerization** | Docker Compose | Compose v2    | Multi-container isolation for Airflow services, Redis broker, and PostgreSQL                   |
 
 ---
 
 ## Data Quality & Idempotency Rules
 
 ### Soda Core Quality Gate (`include/soda/checks.yml`)
+
 Automated data contract checks executed against both `staging.yt_api` and `core.yt_api`:
+
 - **Null Value Checks**: `missing_count("Video_ID") = 0` enforces complete primary key population.
 - **Entity Uniqueness**: `duplicate_count("Video_ID") = 0` eliminates duplicate video records.
 - **View Count Integrity**: Custom SQL assertions verify engagement counts never exceed total views:
@@ -70,11 +72,15 @@ Automated data contract checks executed against both `staging.yt_api` and `core.
   - `comments_count_greater_than_vid_views = 0`: Validates `Comments_Count <= Video_Views`.
 
 ### Data Engineering Design Rules
+
 - **Differential Snapshot Upsert**: Ingestion compares incoming JSON snapshots against existing warehouse IDs—inserting novel records and updating mutable metrics (`Video_Title`, `Video_Views`, `Likes_Count`, `Comments_Count`).
-- **Stale ID Reconciliation**: Computes set difference ($\text{Warehouse\_IDs} \setminus \text{Snapshot\_IDs}$) to automatically remove deleted or privated YouTube videos, preventing ghost records.
+
+* **Stale ID Reconciliation:** Computes set difference (`Warehouse_IDs` - `Snapshot_IDs`) to automatically remove deleted or privated YouTube videos, preventing ghost records.
+
 - **Idempotent Execution**: DAG runs are deterministic and safe to replay; table initialization uses `IF NOT EXISTS` DDL, and state updates guarantee consistency regardless of execution frequency.
 
 ### Automated Testing Strategy
+
 - **Unit & DAG Integrity (`tests/unit_test.py`)**: Asserts environment variable fallback, connection parsing, zero DAG import errors (`dagbag.import_errors == {}`), expected DAG IDs, and exact task counts per DAG (`produce_json`: 5, `update_db`: 3, `data_quality`: 2).
 - **Integration Tests (`tests/integration_test.py`)**: Tests live YouTube Data API v3 connectivity and PostgreSQL socket readiness (`SELECT 1;`).
 
@@ -83,23 +89,29 @@ Automated data contract checks executed against both `staging.yt_api` and `core.
 ## Quick Start
 
 ### Prerequisites
+
 - Docker Engine 20.10+
 - Docker Compose v2+
 
 ### Setup & Execution
+
 1. Clone the repository:
+
    ```bash
    git clone https://github.com/Tranhoainam2kar4/Youtube_ELT.git
    cd Youtube_ELT
    ```
 
 2. Configure environment variables:
+
    > Copy `.env.example` to `.env` and configure your credentials.
+
    ```bash
    cp .env.example .env
    ```
 
 3. Build and launch the cluster:
+
    ```bash
    docker compose up -d --build
    ```
