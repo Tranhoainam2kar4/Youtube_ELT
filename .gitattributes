@@ -1,1 +1,9 @@
+# Tự động chuẩn hóa line endings cho tất cả các file text
+* text=auto eol=lf
+
+# Bắt buộc LF cho shell scripts và cấu hình chạy trên Docker/Linux
 *.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+dockerfile text eol=lf
+requirements.txt text eol=lf

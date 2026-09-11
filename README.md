@@ -1,4 +1,4 @@
-# YouTube Data API ELT Pipeline & Automated Data Quality Engine
+# YouTube ELT Pipeline & Automated Data Quality Platform
 
 [![CI/CD Pipeline](https://github.com/Tranhoainam2kar4/Youtube_ELT/actions/workflows/CI_CD_yt_elt.yaml/badge.svg)](https://github.com/Tranhoainam2kar4/Youtube_ELT/actions/workflows/CI_CD_yt_elt.yaml)
 ![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
@@ -6,246 +6,142 @@
 ![PostgreSQL 13](https://img.shields.io/badge/PostgreSQL-13-4169E1?logo=postgresql&logoColor=white)
 ![Soda Core 3.3.14](https://img.shields.io/badge/Soda%20Core-3.3.14-FF6B6B)
 
-An enterprise-grade, containerized ELT data pipeline orchestrated by Apache Airflow that extracts daily channel analytics via the YouTube Data API v3, writes raw JSON snapshots, executes differential upsert logic across staging and core data warehouse schemas in PostgreSQL, and enforces data quality contracts using Soda Core assertions.
+A production-grade, containerized ELT data pipeline orchestrating daily YouTube channel metric ingestion, multi-layer PostgreSQL warehouse loading (staging to core), and automated Soda Core data quality assertions via Apache Airflow.
 
 ---
 
-## 🏗️ Architecture & Data Flow
+## Architecture & Data Flow
 
+```text
++------------------------+
+| YouTube Data API v3    |
++-----------+------------+
+            |
+            v  [produce_json @ 14:00 Europe/Malta]
++------------------------+
+| Raw JSON Snapshot      | --> ./data/YT_data_{date}.json
++-----------+------------+
+            |
+            v  [update_db : staging_table]
++------------------------+
+| Postgres (Staging)     | --> staging.yt_api (Differential Upsert + Hard Delete)
++-----------+------------+
+            |
+            v  [update_db : core_table]
++------------------------+
+| Postgres (Core)        | --> core.yt_api (ISO 8601 Duration Parsing & Video_Type)
++-----------+------------+
+            |
+            v  [data_quality]
++------------------------+
+| Soda Core Quality Gate | --> Automated Schema, Uniqueness & Metric Sanity Scans
++------------------------+
 ```
-+--------------------------+
-|  YouTube Data API v3     |
-+------------+-------------+
-             |
-             v [DAG 1: produce_json @ 14:00 Europe/Malta]
-+--------------------------+
-| Daily Raw JSON Snapshot  | --> ./data/YT_data_{YYYY-MM-DD}.json
-+------------+-------------+
-             |
-             v [Trigger: update_db]
-+--------------------------+
-| Postgres Staging Schema  | --> staging.yt_api (Differential Upsert + Hard Delete)
-+------------+-------------+
-             |
-             v [DAG 2: update_db]
-+--------------------------+
-| Postgres Core Warehouse  | --> core.yt_api (ISO 8601 Duration Parsing, Video_Type Logic)
-+------------+-------------+
-             |
-             v [Trigger: data_quality]
-+--------------------------+
-| Soda Core Quality Gate   | --> soda scan (Nullability, Uniqueness, Metric Consistency)
-+--------------------------+
-```
+
+### Pipeline DAGs Breakdown
+
+- **`produce_json` (Scheduled: `0 14 * * *`)**: Queries YouTube Data API v3 with pagination (`maxResults=50`) to resolve the channel's uploads playlist, extracts video metadata, metrics, and content details, writes an immutable snapshot to `./data/YT_data_{date}.json`, and triggers `update_db`.
+- **`update_db` (Event-Driven: `TriggerDagRunOperator`)**: Synchronizes the daily snapshot into `staging.yt_api` using differential upsert and stale-record deletion; transforms staging records (parsing ISO 8601 duration into `TIME` format and classifying `Video_Type` as `Shorts` if duration $\le$ 60s else `Normal`) into `core.yt_api`, then triggers `data_quality`.
+- **`data_quality` (Event-Driven: `TriggerDagRunOperator`)**: Executes blocking Soda Core scans sequentially across `staging` and `core` schemas using `soda-core-postgres` to enforce data contract integrity before downstream consumption.
 
 ---
 
-## 🛠️ Technology Stack
+## Tech Stack
 
-| Layer | Component | Version / Spec | Primary Responsibility |
+| Domain | Technology | Version | Purpose |
 | :--- | :--- | :--- | :--- |
-| **Ingestion** | YouTube Data API v3 | REST API v3 | Paginated extraction of channel playlists, video stats, & metadata |
-| **Orchestration** | Apache Airflow | 2.9.3 (CeleryExecutor) | DAG scheduling, task dependency management, & pipeline chaining |
-| **Storage / DWH** | PostgreSQL | 13 | Multi-DB setup (Airflow Metadata, Celery Results, `elt_db` Warehouse) |
-| **Data Quality** | Soda Core | 3.3.14 (`soda-core-postgres`) | Automated schema validation, key uniqueness, & business logic assertions |
-| **Messaging / Queue** | Redis | 7.2-bookworm | Celery broker for distributed task distribution across workers |
-| **Testing** | PyTest | 8.3.3 | Unit tests, DAG integrity checks, & live/mock integration verification |
-| **Containerization** | Docker / Compose | Multi-container | Isolated execution environment for Airflow cluster & database |
-| **CI/CD** | GitHub Actions | Ubuntu Latest | Automated image build, DockerHub push, PyTest suite, & E2E DAG runs |
+| **Orchestration** | Apache Airflow | `2.9.3` | Multi-DAG workflow scheduling, CeleryExecutor task distribution, and pipeline chaining |
+| **Warehouse / DB** | PostgreSQL | `13` | Multi-tenant instance hosting metadata, Celery backend, and ELT warehouse (`staging` & `core`) |
+| **Data Quality** | Soda Core | `3.3.14` | Declarative schema validation, entity uniqueness, and business metric integrity assertions |
+| **Testing** | pytest | `8.3.3` | Automated unit testing, DAG structural integrity checks, and live integration tests |
+| **CI/CD** | GitHub Actions | Ubuntu Latest | Automated image build, Docker Hub deployment, test execution, and end-to-end DAG runs |
+| **Containerization** | Docker Compose | Compose v2 | Multi-container isolation for Airflow services, Redis broker, and PostgreSQL |
 
 ---
 
-## 🔄 Pipeline Orchestration & ELT Transformations
+## Data Quality & Idempotency Rules
 
-The workflow is decoupled into **3 distinct, chained DAGs** to ensure modular execution, fault isolation, and deterministic data flow:
+### Soda Core Quality Gate (`include/soda/checks.yml`)
+Automated data contract checks executed against both `staging.yt_api` and `core.yt_api`:
+- **Null Value Checks**: `missing_count("Video_ID") = 0` enforces complete primary key population.
+- **Entity Uniqueness**: `duplicate_count("Video_ID") = 0` eliminates duplicate video records.
+- **View Count Integrity**: Custom SQL assertions verify engagement counts never exceed total views:
+  - `likes_count_greater_than_vid_views = 0`: Validates `Likes_Count <= Video_Views`.
+  - `comments_count_greater_than_vid_views = 0`: Validates `Comments_Count <= Video_Views`.
 
-1. **`produce_json`** (Schedule: `0 14 * * *` - 14:00 Europe/Malta)
-   - **`get_playlist_id`**: Queries channel content details to resolve the uploads playlist ID.
-   - **`get_video_ids`**: Iteratively paginates through playlist items (50 items/batch) to fetch all video IDs.
-   - **`extract_video_data`**: Queries video snippets, statistics, and content details in batched requests.
-   - **`save_to_json`**: Persists raw response data to `./data/YT_data_{date}.json`.
-   - **`trigger_update_db`**: Fires `TriggerDagRunOperator` to start database synchronization.
+### Data Engineering Design Rules
+- **Differential Snapshot Upsert**: Ingestion compares incoming JSON snapshots against existing warehouse IDs—inserting novel records and updating mutable metrics (`Video_Title`, `Video_Views`, `Likes_Count`, `Comments_Count`).
+- **Stale ID Reconciliation**: Computes set difference ($\text{Warehouse\_IDs} \setminus \text{Snapshot\_IDs}$) to automatically remove deleted or privated YouTube videos, preventing ghost records.
+- **Idempotent Execution**: DAG runs are deterministic and safe to replay; table initialization uses `IF NOT EXISTS` DDL, and state updates guarantee consistency regardless of execution frequency.
 
-2. **`update_db`** (Trigger-only)
-   - **`staging_table`**: Loads daily raw JSON file into `staging.yt_api`. Applies differential upsert (inserts new videos, updates existing metrics on `Video_ID` + `Upload_Date`) and hard deletes records removed from YouTube.
-   - **`core_table`**: Reads from `staging.yt_api`, applies data transformations, and populates `core.yt_api`.
-   - **`trigger_data_quality`**: Triggers automated Soda Core validation checks.
-
-3. **`data_quality`** (Trigger-only)
-   - **`soda_validate_staging`**: Executes Soda Core checks against `staging.yt_api`.
-   - **`soda_validate_core`**: Executes Soda Core checks against `core.yt_api`.
-
----
-
-## ⚡ Transformations & Idempotency Rules
-
-### Transformation Logic (`dags/datawarehouse/data_transformation.py`)
-- **ISO 8601 Duration Parsing**: Parses ISO duration strings (e.g., `PT1M30S`) into Python `timedelta` objects (`parse_duration`).
-- **PostgreSQL Time Formatting**: Formats parsed duration to standard `TIME` type `(datetime.min + duration_td).time()`.
-- **Classification (`Video_Type`)**: Applies business logic to derive video classification:
-  $$\text{Video\_Type} = \begin{cases} \text{'Shorts'}, & \text{if duration} \le 60 \text{ seconds} \\ \text{'Normal'}, & \text{otherwise} \end{cases}$$
-
-### Differential Upsert & Hard Delete (`dags/datawarehouse/data_modification.py`)
-- **Primary Key Constraint**: Uses `Video_ID` (VARCHAR(11)) as the primary key.
-- **Incremental Upsert**:
-  - **Insert**: Rows not found in existing database table IDs are inserted.
-  - **Update**: Pre-existing rows undergo attribute updates (`Video_Title`, `Video_Views`, `Likes_Count`, `Comments_Count`) where `Video_ID` and `Upload_Date` match.
-- **Hard Delete Synchronization**: Computes set difference ($\text{DB\_IDs} \setminus \text{Snapshot\_IDs}$) to delete videos removed from the source channel, preserving exact state alignment between source and warehouse.
+### Automated Testing Strategy
+- **Unit & DAG Integrity (`tests/unit_test.py`)**: Asserts environment variable fallback, connection parsing, zero DAG import errors (`dagbag.import_errors == {}`), expected DAG IDs, and exact task counts per DAG (`produce_json`: 5, `update_db`: 3, `data_quality`: 2).
+- **Integration Tests (`tests/integration_test.py`)**: Tests live YouTube Data API v3 connectivity and PostgreSQL socket readiness (`SELECT 1;`).
 
 ---
 
-## 🛡️ Data Quality Assertions (Soda Core)
-
-Defined in `include/soda/checks.yml`, Soda Core runs quality checks on both `staging` and `core` schemas:
-
-- **Nullability Check**: `missing_count("Video_ID") = 0` (Primary key must not be NULL).
-- **Uniqueness Check**: `duplicate_count("Video_ID") = 0` (Primary key must be strictly unique).
-- **Metric Sanity - Likes**: Custom SQL assertion verifying `Likes_Count <= Video_Views`:
-  ```sql
-  SELECT COUNT(*) FROM yt_api WHERE "Likes_Count" > "Video_Views"
-  ```
-- **Metric Sanity - Comments**: Custom SQL assertion verifying `Comments_Count <= Video_Views`:
-  ```sql
-  SELECT COUNT(*) FROM yt_api WHERE "Comments_Count" > "Video_Views"
-  ```
-
----
-
-## 🗄️ Multi-Database Architecture
-
-The PostgreSQL container runs an entrypoint script (`docker/postgres/init-multiple-databases.sh`) that provisions 3 independent databases on startup:
-
-1. **`airflow_metadata_db`**: Internal database storing Airflow state, task instances, and DAG run histories.
-2. **`celery_results_db`**: Result backend database for Celery task workers.
-3. **`elt_db`**: Data Warehouse holding two operational schemas:
-   - **`staging.yt_api`**: Raw data mirroring API payload (`Video_ID`, `Video_Title`, `Upload_Date`, `Duration`, `Video_Views`, `Likes_Count`, `Comments_Count`).
-   - **`core.yt_api`**: Transformed analytical model containing parsed timestamps, formatted duration, and the derived `Video_Type` metric.
-
----
-
-## 🧪 Testing Suite & CI/CD Pipeline
-
-### Testing Strategy (`tests/`)
-All tests execute within the containerized environment inside `airflow-worker`:
-
-- **Unit & Integrity Tests (`tests/unit_test.py`)**:
-  - Validates environment variable overrides (`AIRFLOW_VAR_*`) and connection string parsing (`AIRFLOW_CONN_*`).
-  - Verifies DAG load integrity (`DagBag.import_errors == {}`).
-  - Asserts expected DAG IDs (`produce_json`, `update_db`, `data_quality`).
-  - Asserts exact task counts per DAG (`produce_json`: 5 tasks, `update_db`: 3 tasks, `data_quality`: 2 tasks).
-- **Integration Tests (`tests/integration_test.py`)**:
-  - Live API ping to YouTube Data API v3 verifying HTTP 200 response.
-  - Live PostgreSQL database socket connection check (`SELECT 1;`).
-- **Fixture Definitions (`tests/conftest.py`)**:
-  - Configures `psycopg2` connection handles, environment patches, and `DagBag` test fixtures.
-
-### CI/CD Workflow (`.github/workflows/CI_CD_yt_elt.yaml`)
-- **Build & Push**: Builds and pushes Docker image to DockerHub (`tranhoainam2004/yt_api_elt:latest` & commit SHA tag) when `Dockerfile` or `requirements.txt` changes.
-- **Automated Testing**: Launches Docker Compose cluster on `ubuntu-latest`, executes `pytest tests/ -v` inside `airflow-worker`, and tests end-to-end DAG execution via `airflow dags test <dag_id>`.
-
----
-
-## 🚀 Quick Start Guide
+## Quick Start
 
 ### Prerequisites
-- Docker Engine 20.10+ & Docker Compose v2+
-- YouTube Data API v3 Key ([Google Cloud Console](https://console.cloud.google.com/))
+- Docker Engine 20.10+
+- Docker Compose v2+
 
-### 1. Environment Setup
-Create a `.env` file in the project root:
+### Setup & Execution
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/Tranhoainam2kar4/Youtube_ELT.git
+   cd Youtube_ELT
+   ```
 
-```ini
-# Docker Image
-DOCKERHUB_NAMESPACE=tranhoainam2004
-DOCKERHUB_REPOSITORY=yt_api_elt
-IMAGE_TAG=1.0.1
+2. Configure environment variables:
+   > Copy `.env.example` to `.env` and configure your credentials.
+   ```bash
+   cp .env.example .env
+   ```
 
-# PostgreSQL Base Credentials
-POSTGRES_CONN_USERNAME=postgres
-POSTGRES_CONN_PASSWORD=your_secure_password
-POSTGRES_CONN_HOST=postgres
-POSTGRES_CONN_PORT=5432
+3. Build and launch the cluster:
+   ```bash
+   docker compose up -d --build
+   ```
 
-# Multi-Database Configuration
-METADATA_DATABASE_NAME=airflow_metadata_db
-METADATA_DATABASE_USERNAME=airflow_meta_user
-METADATA_DATABASE_PASSWORD=meta_user_password
-
-CELERY_BACKEND_NAME=celery_results_db
-CELERY_BACKEND_USERNAME=celery_user
-CELERY_BACKEND_PASSWORD=celery_user_password
-
-ELT_DATABASE_NAME=elt_db
-ELT_DATABASE_USERNAME=yt_api_user
-ELT_DATABASE_PASSWORD=elt_user_password
-
-# Airflow Core Settings
-AIRFLOW_UID=50000
-AIRFLOW_WWW_USER_USERNAME=airflow
-AIRFLOW_WWW_USER_PASSWORD=airflow1234
-FERNET_KEY=pKInkePlkl79C3mafrjthiQdXnsDU8EXjWDZi-SU00U=
-
-# YouTube API Credentials
-API_KEY=your_youtube_api_key
-CHANNEL_HANDLE=MrBeast
-```
-
-### 2. Build & Deploy Cluster
-```bash
-# Clone the repository
-git clone https://github.com/Tranhoainam2kar4/Youtube_ELT.git
-cd Youtube_ELT
-
-# Build and start services in detached mode
-docker compose up -d --build
-```
-
-### 3. Run Test Suite & Test DAG Execution
-```bash
-# Execute PyTest suite inside airflow-worker
-docker exec -it airflow-worker pytest tests/ -v
-
-# Manually trigger an end-to-end test run of the entrypoint DAG
-docker exec -it airflow-worker airflow dags test produce_json
-```
+4. Execute test suite inside the container:
+   ```bash
+   docker exec -it airflow-worker pytest tests/ -v
+   ```
 
 ---
 
-## 📂 Project Directory Tree
+## Project Structure
 
-```
+```text
 Youtube_ELT/
-├── .github/
-│   └── workflows/
-│       └── CI_CD_yt_elt.yaml          # GitHub Actions pipeline (Build, Test, E2E DAG test)
-├── config/                             # Airflow configuration overrides
+├── .github/workflows/
+│   └── CI_CD_yt_elt.yaml          # CI/CD: build/push image, compose setup, pytest, E2E DAG test
 ├── dags/
 │   ├── api/
-│   │   └── video_stats.py              # YouTube Data API extraction logic & TaskFlow tasks
+│   │   └── video_stats.py          # YouTube Data API v3 client, pagination & JSON snapshot writer
 │   ├── dataquality/
-│   │   └── soda.py                     # Soda Core BashOperator task wrapper
+│   │   └── soda.py                 # Soda Core BashOperator task definition
 │   ├── datawarehouse/
-│   │   ├── data_loading.py             # Raw JSON reader
-│   │   ├── data_modification.py        # SQL insert, update (upsert), and delete methods
-│   │   ├── data_transformation.py      # ISO duration parser & Shorts classification
-│   │   ├── data_utils.py               # PostgresHook connection helpers & DDL queries
-│   │   └── dwh.py                      # TaskFlow definitions for staging & core updates
-│   └── main.py                         # DAG definitions (produce_json, update_db, data_quality)
-├── data/                               # Daily JSON snapshots volume mount (YT_data_{date}.json)
+│   │   ├── data_loading.py         # Snapshot loader for raw JSON payloads
+│   │   ├── data_modification.py    # SQL upsert and stale-record deletion logic
+│   │   ├── data_transformation.py  # ISO 8601 duration parsing & Shorts classification
+│   │   ├── data_utils.py           # PostgresHook wrapper, schema/table DDL creation
+│   │   └── dwh.py                  # Staging and core warehouse loading tasks
+│   └── main.py                     # Primary DAG definitions (produce_json, update_db, data_quality)
 ├── docker/
 │   └── postgres/
-│       └── init-multiple-databases.sh # Entrypoint script creating 3 isolated Postgres DBs
+│       └── init-multiple-databases.sh # Entrypoint script provisioning 3 isolated databases
 ├── include/
 │   └── soda/
-│       ├── checks.yml                  # Soda Core quality assertions (Null, Unique, Metrics)
-│       └── configuration.yml           # Soda Core datasource connection config
+│       ├── checks.yml              # Quality checks (nullability, uniqueness, metric consistency)
+│       └── configuration.yml       # Soda data source connection configuration
 ├── tests/
-│   ├── conftest.py                     # PyTest fixtures for Airflow vars, connections, & DB
-│   ├── integration_test.py             # Live API & PostgreSQL socket connection tests
-│   └── unit_test.py                    # Unit tests & DAG integrity assertions
-├── .env                                # Local environment configuration
-├── docker-compose.yaml                 # Multi-service stack (Webserver, Scheduler, Worker, Postgres, Redis)
-├── dockerfile                          # Custom Airflow image (Python 3.11, Airflow 2.9.3, Soda Core)
-├── requirements.txt                    # Python dependencies (soda-core-postgres, pytest)
-└── README.md                           # Production project documentation
+│   ├── conftest.py                 # Pytest fixtures (mock Airflow vars, connections, DB session)
+│   ├── integration_test.py         # Live YouTube API and PostgreSQL connectivity tests
+│   └── unit_test.py                # DAG integrity, task count, and configuration unit tests
+├── .env.example                    # Template environment variables (committed)
+├── docker-compose.yaml             # Multi-service stack (Webserver, Scheduler, Worker, Postgres, Redis)
+├── dockerfile                      # Airflow 2.9.3 + Python 3.11 + Soda Core base image
+└── requirements.txt                # Python dependencies (soda-core-postgres, pytest)
 ```
