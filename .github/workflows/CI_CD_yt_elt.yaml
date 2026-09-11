@@ -2,10 +2,12 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: -main
-      -'feature/*'
+    branches:
+      - main
+      - "feature/*"
   pull_request:
-    branches: -main
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -14,6 +16,7 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Get changed files
         id: changed-files-build
         uses: tj-actions/changed-files@v45
@@ -21,15 +24,18 @@ jobs:
           files: |
             Dockerfile
             requirements.txt
+
       - name: Set up Docker Buildx
         if: steps.changed-files-build.outputs.any_changed == 'true'
         uses: docker/setup-buildx-action@v3
+
       - name: Log in to DockerHub
         if: steps.changed-files-build.outputs.any_changed == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
       - name: Build and push Docker image
         if: steps.changed-files-build.outputs.any_changed == 'true'
         run: |
@@ -69,6 +75,7 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
       - name: Get changed files
         id: changed-files-tests
         uses: tj-actions/changed-files@v45
@@ -77,12 +84,15 @@ jobs:
             dags/**
             include/**
             docker-compose.yaml
+
       - name: Set up Docker Compose
         if: steps.changed-files-tests.outputs.any_changed == 'true'
         run: docker compose up -d
+
       - name: Run Unit and Integration Tests
         if: steps.changed-files-tests.outputs.any_changed == 'true'
         run: docker exec -t airflow-worker sh -c "pytest tests/ -v"
+
       - name: Run End-to-End DAG Tests
         if: steps.changed-files-tests.outputs.any_changed == 'true'
         run: |
@@ -90,6 +100,7 @@ jobs:
           for DAG in "${DAG_NAMES[@]}"; do
             docker exec -t airflow-worker sh -c "airflow dags test $DAG"
           done
+
       - name: Tear down Docker Compose
         if: steps.changed-files-tests.outputs.any_changed == 'true'
         run: docker compose down
